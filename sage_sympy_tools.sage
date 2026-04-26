@@ -6,22 +6,24 @@ from sage.all import *
 
 def replace_pow(expr, handler):
 
+    # атомарные
     if not hasattr(expr, "operands"):
         return expr
 
     try:
-        ops = expr.operands()
-    except:
+        op = expr.operator()
+        args = expr.operands()
+    except Exception:
         return expr
 
-    if hasattr(expr, "operator") and expr.operator() == pow:
-        base, exp = ops
+    # ⭐ правильный детект степени в Sage
+    if len(args) == 2 and expr.nops() == 2 and "^" in str(expr):
+        base, exp = args
         return handler(base, exp)
 
-    new_ops = tuple(replace_pow(op, handler) for op in ops)
+    new_args = [replace_pow(a, handler) for a in args]
 
-    op = expr.operator()
     if op is None:
         return expr
 
-    return op(*new_ops)
+    return op(*new_args)

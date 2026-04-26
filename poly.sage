@@ -2,7 +2,6 @@ from collections.abc import Iterable
 import pickle
 from functools import cached_property
 load("utils.sage")
-load("sage_sympy_tools.sage")
 
 class VariablesHolder:
     """
@@ -117,7 +116,7 @@ class EquationSystem:
 
     @property
     def introduced_variables(self):
-        return [(x, f) for x, f in self._substitution_equations.items()]
+        return self._substitution_equations.items()
 
     @property
     def polynomial_equations(self):
@@ -137,20 +136,38 @@ class EquationSystem:
             except Exception:
                 self._equations[x] = fx
 
-    def add_new_var(self, substitution, new_var=None) -> None:
-        """
-        Добавляет new_var = substitution в систему.
-        """
+    def add_new_var(self, substitution, new_var=None):
         if substitution in self._substitution_equations.values():
             return
 
         if new_var is None:
             new_var = self.variables.create()
 
+        # 1. ПРАВИЛЬНАЯ подстановка
+        self._equations = {
+            k: v.subs({substitution: new_var})
+            for k, v in self._equations.items()
+        }
+
+        # 2. сохранить
         self._substitution_equations[new_var] = substitution
+
+        # 3. пересчитать производную
         self._equations[new_var] = self._calculate_Lie_derivative(substitution)
 
+        # 4. ВАЖНО: сброс кэша полинома
+        self._poly_equations = {k: None for k in self._equations.keys()}
+
         self._fill_poly_system()
+
+    def _sanitize(self, expr):
+        if isinstance(expr, (list, tuple)):
+            return sum(self._sanitize(x) for x in expr)
+
+        if hasattr(expr, "__iter__") and not hasattr(expr, "variables"):
+            return sum(self._sanitize(x) for x in expr)
+
+        return expr
 
     def _calculate_Lie_derivative(self, expr):
         """
@@ -169,7 +186,7 @@ class EquationSystem:
 
         for input_var in expr_vars.intersection(self.variables.input):
             input_var_dot = make_derivative_symbol(input_var)
-            self.variables.input.add(input_var_dot)
+            self.variables._input_variables.add(input_var_dot)
             result += diff(expr, input_var) * input_var_dot
 
         return result
@@ -182,13 +199,15 @@ class EquationSystem:
             if self._poly_equations[x] is None:
                 self._poly_equations[x] = self._try_convert_to_polynomial(fx)
 
-    def print(self, str_func=str_qbee, use_poly_equations=True, with_introduced_variables=True):
-        if with_introduced_variables:
-            self.print_substitutions(str_func)
+    def print(self, use_poly_equations=True):
+        if self._substitution_equations:
+            self.print_substitutions()
             print()
 
         equations = self.polynomial_equations if use_poly_equations else self.equations
-        print("\n".join([str_func(eq) for eq in equations]))
+
+        for lhs, rhs in equations:
+            print(f"{lhs} = {rhs}")
 
     def substitution_equations_str(self):
         return '\n'.join(map(str_qbee, self.introduced_variables))
@@ -201,131 +220,93 @@ class EquationSystem:
         self._fill_poly_system()  # possible performance issue
         return all([x is not None for x in self._poly_equations.values()])
     def _try_convert_to_polynomial(self, expr):
-        """
-        Sage version of QBee polynomial conversion.
-        Uses Sage SR + custom replace_pow tool.
-        """
-
         try:
-            # ----------------------------
-            # 1. substitute introduced variables
-            # ----------------------------
+            if isinstance(expr, (list, tuple)):
+                return None
+
             replaced = expr
 
             for new_var, old_expr in self._substitution_equations.items():
-                replaced = replaced.subs({old_expr: new_var})
+                if isinstance(old_expr, (list, tuple)):
+                    continue
+                try:
+                    replaced = replaced.subs(old_expr == new_var)
+                except:
+                    pass
 
-            # ----------------------------
-            # 2. handle powers (SymPy .replace(Pow, ...) replacement)
-            # ----------------------------
-            replaced = replace_pow(
-                replaced,
-                lambda base, exp: base^exp
+            replaced = replaced.expand().simplify_full()
+
+            vars_list = sorted(
+                list(self.variables.state) + list(self.variables.input),
+                key=str
             )
 
-            # ----------------------------
-            # 3. polynomial check (Sage native)
-            # ----------------------------
-            vars_list = list(self.variables.state) + list(self.variables.input)
+            clean_vars = [v for v in vars_list if "'" not in str(v)]
 
-            if replaced.is_polynomial(vars_list):
-                return replaced
+            R = PolynomialRing(QQ, clean_vars)
 
-            return None
+            R(replaced)   # <-- КЛЮЧЕВАЯ ПРОВЕРКА
 
-        except Exception:
+            return replaced
+
+        except:
             return None
     
     def to_poly_equations(self, inputs_ord: dict):
-
-        # ----------------------------
-        # 1. ensure polynomial system is filled
-        # ----------------------------
         self._fill_poly_system()
 
-        # ----------------------------
-        # 2. build inputs (Sage variables)
-        # ----------------------------
         inputs_ord_sym = {
             v: 0
             for v in self.variables.input
-            if "'" not in str(v)   # remove derivatives
+            if "'" not in str(v)
         }
 
-        # add external inputs
         for k, v in inputs_ord.items():
-            inputs_ord_sym[var(str_qbee(k))] = v
+            inputs_ord_sym[var(str(k))] = v
 
-        # ----------------------------
-        # 3. derivatives of inputs
-        # ----------------------------
         d_inputs = generate_derivatives(inputs_ord_sym)
 
-        # ----------------------------
-        # 4. flatten unique variables (NO SymPy flatten/OrderedSet)
-        # ----------------------------
-        unique_flattened_inputs = []
+        # flatten (Sage-safe)
+        def flatten_safe(x):
+            if isinstance(x, (list, tuple, set)):
+                out = []
+                for i in x:
+                    out.extend(flatten_safe(i))
+                return out
+            return [x]
+        unique_inputs = set()
         for item in d_inputs:
             for x in item:
-                if isinstance(x, list):
-                    unique_flattened_inputs.extend(flatten(x))
-                else:
-                    unique_flattened_inputs.append(x)
+                if isinstance(x, (list, tuple, set)):
+                    continue
+                if hasattr(x, "variables") or hasattr(x, "operator"):
+                    unique_inputs.add(x)
 
-        unique_flattened_inputs = list(set(unique_flattened_inputs))
+        all_vars = list(self.variables.state) + list(unique_inputs)
+        all_vars = [var(str(v)) if not hasattr(v, "operator") else v for v in all_vars]
 
-        # ----------------------------
-        # 5. build polynomial ring (Sage replacement for sp.ring)
-        # ----------------------------
-        all_vars = list(self.variables.state) + unique_flattened_inputs
         R = PolynomialRing(QQ, all_vars)
 
-        # ----------------------------
-        # 6. build equations (Laurent-style builder must be Sage-compatible)
-        # ----------------------------
-        equations = make_laurent_poly(
-            [eq[1] for eq in self.polynomial_equations],  # RHS only
-            self.variables.state,
-            unique_flattened_inputs,
-            R
-        )
+        equations = [
+            (eq[0], R(eq[1].expand()))
+            for eq in self.polynomial_equations
+        ]       
 
-        # ----------------------------
-        # 7. add input derivative constraints
-        # ----------------------------
         for v in inputs_ord_sym:
-
-            # find derivative generators in ring
             for g in R.gens():
                 if str(v) + "'" in str(g):
                     equations.append(g)
-
-            # zero constraint
             equations.append(R(0))
 
-        # ----------------------------
-        # 8. build exclusion list
-        # ----------------------------
         inputs_to_exclude = []
 
         for item in d_inputs:
             try:
-                clean_item = []
-                for x in item:
-                    if isinstance(x, list):
-                        clean_item.extend(flatten(x))
-                    else:
-                        clean_item.append(x)
-
-                inputs_to_exclude.append(tuple(R(x) for x in clean_item))
-            except Exception:
+                inputs_to_exclude.append(tuple(R(x) for x in item))
+            except:
                 pass
 
-        # ----------------------------
-        # 9. return
-        # ----------------------------
-        return equations, inputs_to_exclude, unique_flattened_inputs
-    
+        return equations, inputs_to_exclude, list(unique_inputs)
     def _is_expr_polynomial(self, expr):
         # ----------------------------
         # 1. fast path (pure polynomial)
@@ -346,60 +327,6 @@ class EquationSystem:
 
         return len(filter_laurent_monoms(self, non_polynomials)) == 0
     
-    def _replace_negative_integer_pow(self, base, exp):
-
-        # только целые отрицательные степени
-        if exp in ZZ and exp < 0:
-
-            inv_expr = 1 / base
-
-            # подставляем уже введённые переменные
-            inv_expr = inv_expr.subs(self._substitution_equations)
-
-            new_var = key_from_value(self._substitution_equations, inv_expr)
-
-            if new_var is not None:
-                return new_var^(-exp)
-        return base^exp
-
-
-    def _replace_irrational_pow(self, base, exp):
-
-        # вещественные (нецелые) степени
-        if exp in RR:
-
-            for k, v in self._substitution_equations.items():
-
-                # v должно быть степенью
-                if hasattr(v, "operator") and v.operator().__name__ == "pow":
-
-                    b, e = v.operands()
-
-                    # совпадает база + почти совпадает степень
-                    if b == base and abs(float(e) - float(exp)) < 1e-9:
-                        return k
-
-        return base^exp
-
-    def _replace_symbolic_pow(self, base, exp):
-
-        # символические степени (не число)
-        if exp not in ZZ and exp not in RR:
-
-            for k, v in self._substitution_equations.items():
-
-                if hasattr(v, "operator") and v.operator().__name__ == "pow":
-
-                    b, e = v.operands()
-
-                    if b == base:
-
-                        ratio = exp / e
-
-                        if ratio in ZZ:
-                            return k^ratio
-
-        return base^exp
 
     def __str__(self):
         equations = self.polynomial_equations if self.is_polynomial() else self.equations

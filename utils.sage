@@ -34,11 +34,9 @@ def make_laurent_poly(exprs, state_vars, input_vars, R):
 
     for e in exprs:
         try:
-            if isinstance(e, (list, tuple)):
-                e = sum(e)   # или просто взять e[0], зависит от логики
-
-            polys.append(R(e))
-
+            # Sage coercion напрямую
+            poly = R(e.expand())
+            polys.append(poly)
         except Exception:
             polys.append(R(0))
 
