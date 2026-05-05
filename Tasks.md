@@ -7,7 +7,9 @@ Ekaterina:
 Number tasks ready to work:
 nums: 
 
-
+✅ Готово
+⏳ В работе
+❌ Не готово / не начато
 
 1) VariablesHolder.start_new_vars_with
 
