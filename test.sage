@@ -7,8 +7,8 @@ load("quadro.sage")
 x, y = var('x y')
 
 eqs = [
-    (x, x^2 + y^2),
-    (y, x^3 + y)
+    (x, x^2 + y^3),
+    (y, x + y)
 ]
 
 print("INPUT SYSTEM:")
